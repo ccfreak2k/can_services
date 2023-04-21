@@ -139,15 +139,33 @@ fn main() {
             logger.log(msg);
             current_log_lines += 1;
             hup.store(false, Ordering::Relaxed);
-            can.set_read_timeout(time::Duration::from_secs(timeout_value)).unwrap();
+            //can.set_read_timeout(time::Duration::from_secs(timeout_value)).unwrap();
+            can.set_read_timeout(time::Duration::from_millis(500)).unwrap();
+            let mut timeout = timeout_value*2;
+            let mut busy_state = 0;
             while !hup.load(Ordering::Relaxed) && !term.load(Ordering::Relaxed) {
                 let msg = match can.read_frame() {
-                    Ok(message) => message,
+                    Ok(message) => {
+                        if busy_state == 0 {
+                            busy_state = 1;
+                            busy_led.set_high().unwrap();
+                        }
+                        timeout = timeout_value;
+                        message
+                    },
                     Err(e) => {
                         if socketcan::ShouldRetry::should_retry(&e) {
-                            // TODO: Flash the busy LED when timing out
-                            // Timed out
-                            break;
+                            busy_state = 0;
+                            if timeout == 0 {
+                                break;
+                            }
+                            if timeout % 2 == 0 {
+                                busy_led.set_high().unwrap();
+                            } else {
+                                busy_led.set_low().unwrap();
+                            }
+                            timeout -= 1;
+                            continue;
                         } else if e.kind() == std::io::ErrorKind::Interrupted {
                             // Interrupted by signal
                             continue;
