@@ -78,7 +78,7 @@ fn main() {
             .short("e")
             .long("busy-led")
             .value_name("PIN")
-            .help("Which output GPIO pin to use for the busy LED. The LED will be lit as long as a log file is still open.")
+            .help("Which output GPIO pin to use for the busy LED. The LED will be lit as long as a log file is still open. Set to 0 to disable the LED function.")
             .takes_value(true)
             .validator(is_num)
             .default_value("22"))
@@ -103,8 +103,6 @@ fn main() {
     println!("Max log lines:   {}", max_log_lines);
     println!("Write buffer:    {}", buffer_size);
 
-    //let outbox_path = path::Path::new(log_outbox);
-    //let log_path = path::Path::new(log_location);
     let term = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term)).unwrap();
     let hup = Arc::new(AtomicBool::new(false));
@@ -131,7 +129,9 @@ fn main() {
         };
         {
             // start logging
-            busy_led.set_high().unwrap();
+            if busy_led_pin != 0 {
+                busy_led.set_high().unwrap();
+            }
             let log_name = format!("{}.log", &Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true).replace(":","_"));
             let log_path = format!("{}/{}", log_location, log_name);
             println!("Logging to {}", log_name);
@@ -139,18 +139,17 @@ fn main() {
             logger.log(msg);
             current_log_lines += 1;
             hup.store(false, Ordering::Relaxed);
-            //can.set_read_timeout(time::Duration::from_secs(timeout_value)).unwrap();
             can.set_read_timeout(time::Duration::from_millis(500)).unwrap();
             let mut timeout = timeout_value*2;
             let mut busy_state = 0;
             while !hup.load(Ordering::Relaxed) && !term.load(Ordering::Relaxed) {
                 let msg = match can.read_frame() {
                     Ok(message) => {
-                        if busy_state == 0 {
+                        if busy_state == 0 && busy_led_pin != 0 {
                             busy_state = 1;
                             busy_led.set_high().unwrap();
                         }
-                        timeout = timeout_value;
+                        timeout = timeout_value*2;
                         message
                     },
                     Err(e) => {
@@ -159,10 +158,12 @@ fn main() {
                             if timeout == 0 {
                                 break;
                             }
-                            if timeout % 2 == 0 {
-                                busy_led.set_high().unwrap();
-                            } else {
-                                busy_led.set_low().unwrap();
+                            if busy_led_pin != 0 {
+                                if timeout % 2 == 0 {
+                                    busy_led.set_high().unwrap();
+                                } else {
+                                    busy_led.set_low().unwrap();
+                                }
                             }
                             timeout -= 1;
                             continue;
@@ -185,7 +186,9 @@ fn main() {
             }
             hup.store(false, Ordering::Relaxed);
             logger.flush();
-            busy_led.set_low().unwrap();
+            if busy_led_pin != 0 {
+                busy_led.set_low().unwrap();
+            }
             println!("Waiting for first frame");
         }
     }
