@@ -140,30 +140,42 @@ fn main() {
             current_log_lines += 1;
             hup.store(false, Ordering::Relaxed);
             can.set_read_timeout(time::Duration::from_millis(500)).unwrap();
-            let mut timeout = timeout_value*2;
-            let mut busy_state = 0;
+            let mut timeout: u64 = timeout_value*2;
+            let mut busy_state: bool = false;
+            let mut led_state: bool = false;
+            let mut frame_counter: u32 = 0;
             while !hup.load(Ordering::Relaxed) && !term.load(Ordering::Relaxed) {
                 let msg = match can.read_frame() {
                     Ok(message) => {
-                        if busy_state == 0 && busy_led_pin != 0 {
-                            busy_state = 1;
+                        if busy_state == false && busy_led_pin != 0 {
+                            busy_state = true;
+                            frame_counter = 0;
+                            led_state = true;
                             busy_led.set_high().unwrap();
+                        }
+                        // Flash the LED based on frame count
+                        frame_counter += 1;
+                        if frame_counter >= 99 && busy_led_pin != 0 {
+                            frame_counter = 0;
+                            led_state = !led_state;
+                            busy_led.set_value(led_state).unwrap();
                         }
                         timeout = timeout_value*2;
                         message
                     },
                     Err(e) => {
                         if socketcan::ShouldRetry::should_retry(&e) {
-                            busy_state = 0;
+                            busy_state = false;
+                            frame_counter = 0;
                             if timeout == 0 {
                                 break;
                             }
+                            // Flash the LED based on timeout
                             if busy_led_pin != 0 {
                                 if timeout % 2 == 0 {
-                                    busy_led.set_high().unwrap();
-                                } else {
-                                    busy_led.set_low().unwrap();
+                                    led_state = !led_state;
                                 }
+                                busy_led.set_value(led_state).unwrap();
                             }
                             timeout -= 1;
                             continue;
