@@ -1,14 +1,24 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time;
 use chrono;
 use chrono::prelude::*;
 use gpio::GpioOut;
+use threadpool::ThreadPool;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 mod carlogger_service;
 
 extern crate clap;
 extern crate socketcan;
+
+enum LogMessage {
+    Ping,
+    Frame(socketcan::CANFrame),
+    Flush,
+    Exit,
+}
 
 fn is_num(v: String) -> Result<(), String> {
     let val: i64 = v.parse::<i64>().unwrap();
@@ -109,8 +119,12 @@ fn main() {
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&hup)).unwrap();
     let mut busy_led = gpio::sysfs::SysFsGpioOutput::open(busy_led_pin).unwrap();
 
+    // Two threads let one finish and close a file while the next starts a new one.
+    let pool = ThreadPool::new(2);
+
     println!("Waiting for first frame");
     while !term.load(Ordering::Relaxed) {
+        busy_led.set_low().unwrap();
         can.set_read_timeout(time::Duration::from_secs(60)).unwrap();
         can.filter_accept_all().unwrap();
         // Wait for a CAN frame
@@ -134,9 +148,31 @@ fn main() {
             }
             let log_name = format!("{}.log", &Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true).replace(":","_"));
             let log_path = format!("{}/{}", log_location, log_name);
-            println!("Logging to {}", log_name);
-            let mut logger = carlogger_service::Logger::new(log_path, interface.to_string(), buffer_size);
-            logger.log(msg);
+            println!("Logging to: {}", log_path);
+            let (tx, rx): (Sender<LogMessage>, Receiver<LogMessage>) = mpsc::channel();
+            let st_iface: String = interface.to_string();
+            // Pick up a new thread from the pool
+            pool.execute(move|| {
+                let mut logger = carlogger_service::Logger::new(log_path, st_iface, buffer_size);
+                loop {
+                    match rx.recv() {
+                        Ok(message) => match message {
+                            LogMessage::Ping => continue,
+                            LogMessage::Frame(frame) => logger.log(frame),
+                            LogMessage::Flush => logger.flush(),
+                            LogMessage::Exit => break,
+                        },
+                        Err(_) => break,
+                    };
+                }
+            });
+            match tx.send(LogMessage::Frame(msg)) {
+                Ok(_) => {},
+                Err(_) => {
+                    println!("Logging thread exited unexpectedly; rotating log");
+                    continue;
+                }
+            };
             current_log_lines += 1;
             hup.store(false, Ordering::Relaxed);
             can.set_read_timeout(time::Duration::from_millis(500)).unwrap();
@@ -155,7 +191,7 @@ fn main() {
                         }
                         // Flash the LED based on frame count
                         frame_counter += 1;
-                        if frame_counter >= 99 && busy_led_pin != 0 {
+                        if frame_counter >= 100 && busy_led_pin != 0 {
                             frame_counter = 0;
                             led_state = !led_state;
                             busy_led.set_value(led_state).unwrap();
@@ -188,16 +224,22 @@ fn main() {
                         }
                     }
                 };
-                logger.log(msg);
+                match tx.send(LogMessage::Frame(msg)) {
+                    Ok(_) => {},
+                    Err(_) => {
+                        println!("Logging thread exited unexpectedly; rotating log");
+                        continue;
+                    }
+                };
                 current_log_lines += 1;
                 if current_log_lines >= max_log_lines {
                     println!("Max log lines reached; rotating log");
-                    logger.flush();
+                    let _ = tx.send(LogMessage::Exit);
                     break;
                 }
             }
             hup.store(false, Ordering::Relaxed);
-            logger.flush();
+            let _ = tx.send(LogMessage::Exit);
             if busy_led_pin != 0 {
                 busy_led.set_low().unwrap();
             }

@@ -48,6 +48,10 @@ impl Logger {
         }
     }
 
+    pub fn drop(&mut self) {
+        let _ = self.fd.flush();
+    }
+
     pub fn log(&mut self, f: socketcan::CANFrame) {
         self.last_time_stamp = std::cmp::max(SystemTime::now().duration_since(UNIX_EPOCH).unwrap(), self.last_time_stamp);
         let lts = self.last_time_stamp.as_micros();
@@ -56,7 +60,7 @@ impl Logger {
         if f.is_error() {
             // Just write a plain python canutils-style error to the log
             // TODO: have a separate log for logging the specific error if available
-            eprintln!("An error occurred: {}", f.err());
+            //eprintln!("An error occurred: {}", f.err());
             body = format!("{} 20000080#0000000000000000\n", header);
         } else if f.is_rtr() {
             // Return request frame
@@ -77,10 +81,6 @@ impl Logger {
     }
 
     pub fn flush(&mut self) {
-        self.fd.flush().unwrap();
-    }
-
-    pub fn close(&mut self) {
         self.fd.flush().unwrap();
     }
 }
