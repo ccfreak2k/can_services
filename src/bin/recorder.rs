@@ -1,23 +1,31 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time;
 use chrono;
 use chrono::prelude::*;
 use gpio::GpioOut;
-use threadpool::ThreadPool;
+use threadpool::Builder;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-mod carlogger_service;
+pub mod carlogger_service;
 
 extern crate clap;
-extern crate socketcan;
+use socketcan::{CanError, CanFrame, CanSocket, Socket, SocketOptions};
 
+#[allow(dead_code)]
 enum LogMessage {
     Ping,
-    Frame(socketcan::CANFrame),
+    Frame(CanFrame),
     Flush,
     Exit,
+}
+
+#[allow(dead_code)]
+enum WriterError {
+    // Generic error
+    Error(String),
+    CANError(CanError),
+    IOError(std::io::Error),
 }
 
 fn is_num(v: String) -> Result<(), String> {
@@ -28,7 +36,7 @@ fn is_num(v: String) -> Result<(), String> {
 
 fn main() {
     let matches = clap::App::new("Recorder")
-        .version("1.0")
+        .version("1.1")
         .author("ccfreak2k")
         .about("Records CAN data to a file")
         .arg(clap::Arg::with_name("interface")
@@ -95,7 +103,7 @@ fn main() {
         .get_matches();
 
     let interface: &str = matches.value_of("interface").unwrap();
-    let can = socketcan::CANSocket::open(interface).unwrap();
+    let can = CanSocket::open(interface).unwrap();
 
     let timeout_value: u64 = matches.value_of("timeout-value").unwrap().parse::<u64>().unwrap();
     let bus_speed: u64     = matches.value_of("bus-speed").unwrap().parse::<u64>().unwrap();
@@ -120,13 +128,15 @@ fn main() {
     let mut busy_led = gpio::sysfs::SysFsGpioOutput::open(busy_led_pin).unwrap();
 
     // Two threads let one finish and close a file while the next starts a new one.
-    let pool = ThreadPool::new(2);
+    let pool = Builder::new().num_threads(2).thread_name("Writer".to_string()).build();
 
     println!("Waiting for first frame");
     while !term.load(Ordering::Relaxed) {
-        busy_led.set_low().unwrap();
+        if busy_led_pin != 0 {
+            busy_led.set_low().unwrap();
+        }
         can.set_read_timeout(time::Duration::from_secs(60)).unwrap();
-        can.filter_accept_all().unwrap();
+        can.set_filter_accept_all().unwrap();
         // Wait for a CAN frame
         let mut current_log_lines: u64 = 0;
 
@@ -150,6 +160,7 @@ fn main() {
             let log_path = format!("{}/{}", log_location, log_name);
             println!("Logging to: {}", log_path);
             let (tx, rx): (Sender<LogMessage>, Receiver<LogMessage>) = mpsc::channel();
+            let (etx, erx): (Sender<WriterError>, Receiver<WriterError>) = mpsc::channel();
             let st_iface: String = interface.to_string();
             // Pick up a new thread from the pool
             pool.execute(move|| {
@@ -158,21 +169,48 @@ fn main() {
                     match rx.recv() {
                         Ok(message) => match message {
                             LogMessage::Ping => continue,
-                            LogMessage::Frame(frame) => logger.log(frame),
-                            LogMessage::Flush => logger.flush(),
-                            LogMessage::Exit => break,
+                            LogMessage::Frame(frame) => {
+                                if let CanFrame::Error(ef) = frame {
+                                    // Bubble up the error to the main thread but don't exit
+                                    if let Err(_) = etx.send(WriterError::CANError(CanError::from(ef))) {
+                                        break;
+                                    }
+                                }
+                                match logger.log(frame) {
+                                    Ok(s) => {
+                                        if s == 0 {
+                                            let _ = etx.send(WriterError::Error(String::from("Wrote 0 bytes to log")));
+                                            break;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        let _ = etx.send(WriterError::IOError(e));
+                                        break;
+                                    }
+                                
+                                };
+                            }
+                            LogMessage::Flush => {
+                                match logger.flush() {
+                                    Ok(_) => {},
+                                    Err(e) => {
+                                        let _ = etx.send(WriterError::IOError(e));
+                                        break;
+                                    }
+                                };
+                            },
+                            LogMessage::Exit => {
+                                break;
+                            }
                         },
-                        Err(_) => break,
+                        Err(_) => {
+                            break;
+                        },
                     };
                 }
             });
-            match tx.send(LogMessage::Frame(msg)) {
-                Ok(_) => {},
-                Err(_) => {
-                    println!("Logging thread exited unexpectedly; rotating log");
-                    continue;
-                }
-            };
+            // An immediate failure to record a frame is basically unrecoverable, so just unwrap it
+            tx.send(LogMessage::Frame(msg)).unwrap();
             current_log_lines += 1;
             hup.store(false, Ordering::Relaxed);
             can.set_read_timeout(time::Duration::from_millis(500)).unwrap();
@@ -181,6 +219,32 @@ fn main() {
             let mut led_state: bool = false;
             let mut frame_counter: u32 = 0;
             while !hup.load(Ordering::Relaxed) && !term.load(Ordering::Relaxed) {
+                // Check the error queue first
+                match erx.try_recv() {
+                    Ok(e) => match e {
+                        WriterError::Error(msg) => {
+                            println!("Logging Error: {}", msg);
+                            break;
+                        },
+                        WriterError::CANError(e) => {
+                            println!("CAN Error: {}", e);
+                        },
+                        WriterError::IOError(e) => {
+                            println!("IO Error: {}", e);
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        match e {
+                            mpsc::TryRecvError::Empty => {},
+                            mpsc::TryRecvError::Disconnected => {
+                                println!("Wrote {} lines to log", current_log_lines);
+                                println!("Logging thread exited unexpectedly (thread feedback queue error); rotating log");
+                                break;
+                            }
+                        }
+                    },
+                };
                 let msg = match can.read_frame() {
                     Ok(message) => {
                         if busy_state == false && busy_led_pin != 0 {
@@ -224,15 +288,14 @@ fn main() {
                         }
                     }
                 };
-                match tx.send(LogMessage::Frame(msg)) {
-                    Ok(_) => {},
-                    Err(_) => {
-                        println!("Logging thread exited unexpectedly; rotating log");
-                        continue;
-                    }
-                };
+                if let Err(_) = tx.send(LogMessage::Frame(msg)) {
+                    println!("Wrote {} lines to log", current_log_lines);
+                    println!("Logging thread exited unexpectedly (log queue sender error); rotating log");
+                    break;
+                }
                 current_log_lines += 1;
                 if current_log_lines >= max_log_lines {
+                    println!("Wrote {} lines to log", current_log_lines);
                     println!("Max log lines reached; rotating log");
                     let _ = tx.send(LogMessage::Exit);
                     break;
@@ -243,6 +306,7 @@ fn main() {
             if busy_led_pin != 0 {
                 busy_led.set_low().unwrap();
             }
+            println!("Wrote {} lines to log", current_log_lines);
             println!("Waiting for first frame");
         }
     }

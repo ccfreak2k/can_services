@@ -11,9 +11,9 @@ clap = "2.34.0"
 gpio = "0.4.1"
 hex = "0.4.3"
 log = "0.4.20"
-socketcan = "1.7"
-serde = { version = "1.0.189", features = ["derive"] }
+socketcan = "3.3"
+serde = { version = "1.0.190", features = ["derive"] }
 signal-hook = "0.3.17"
 threadpool = "1.8.1"
-tokio = { version = "1.33.0", features = ["full"] }
+#tokio = { version = "1.33.0", features = ["full"] }
 toml = "0.5.11"
