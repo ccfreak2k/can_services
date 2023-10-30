@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time;
@@ -9,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 pub mod carlogger_service;
 
-extern crate clap;
+use clap::Parser;
 use socketcan::{CanError, CanFrame, CanSocket, Socket, SocketOptions};
 
 #[allow(dead_code)]
@@ -28,95 +29,44 @@ enum WriterError {
     IOError(std::io::Error),
 }
 
-fn is_num(v: String) -> Result<(), String> {
-    let val: i64 = v.parse::<i64>().unwrap();
-    if val > 0 { return Ok(()); }
-    Err(String::from("Value must be a positive non-zero integer"))
+#[derive(Parser)]
+#[command(name = "recorder")]
+#[command(version = "1.1")]
+#[command(author)]
+#[command(about = "Records CAN data to a file")]
+struct Args {
+    #[arg(short = 'i', long, name = "name", default_value = "can0", help = "Interface to listen for traffic")]
+    interface: String,
+    #[arg(short = 'b', long, name = "speed", default_value = "500000", value_parser = clap::value_parser!(u64).range(1..), help = "The speed of the interface, in bps")]
+    bus_speed: u64,
+    #[arg(short = 't', long, name = "seconds", default_value = "15", value_parser = clap::value_parser!(u64).range(1..), help = "Number of seconds of bus silence allowed before the program will rotate logs")]
+    timeout: u64,
+    #[arg(short = 'l', long, name = "path", default_value = ".", help = "The location to store the currently recording log")]
+    log_location: String,
+    #[arg(short = 'm', long, name = "lines", default_value = "16777216", value_parser = clap::value_parser!(u64).range(1..), help = "The maximum number of lines to record to a log file before the log is automatically rotated")]
+    max_log_lines: u64,
+    #[arg(short = 's', long, name = "size", default_value = "1048576", value_parser = clap::value_parser!(u32).range(1..), help = "The amount of bytes to buffer for file writes")]
+    buffer_size: u32,
+    #[arg(short = 'e', long, name = "pin_number", default_value = "22", value_parser = clap::value_parser!(u16).range(0..), help = "Which output GPIO pin to use for the busy LED. The LED will be lit as long as a log file is still open. Set to 0 to disable the LED function.")]
+    busy_led: u16,
 }
 
 fn main() {
-    let matches = clap::App::new("Recorder")
-        .version("1.1")
-        .author("ccfreak2k")
-        .about("Records CAN data to a file")
-        .arg(clap::Arg::with_name("interface")
-            .short("i")
-            .long("interface")
-            .value_name("IFACE")
-            .help("Interface to listen for traffic")
-            .takes_value(true)
-            .default_value("can0"))
-        .arg(clap::Arg::with_name("bus-speed")
-            .short("b")
-            .long("bus-speed")
-            .value_name("BPS")
-            .help("The speed of the interface, in bps")
-            .takes_value(true)
-            .validator(is_num)
-            .default_value("500000"))
-        .arg(clap::Arg::with_name("timeout-value")
-            .short("t")
-            .long("timeout-value")
-            .value_name("SECONDS")
-            .help("Number of seconds of bus silence allowed before the program will rotate logs")
-            .takes_value(true)
-            .validator(is_num)
-            .default_value("15"))
-        .arg(clap::Arg::with_name("log-location")
-            .short("l")
-            .long("log-location")
-            .value_name("PATH")
-            .help("The location to store the currently recording log")
-            .takes_value(true)
-            .default_value("."))
-        .arg(clap::Arg::with_name("log-outbox")
-            .short("o")
-            .long("log-outbox")
-            .value_name("PATH")
-            .help("The location to move logs to when the logs are rotated")
-            .takes_value(true)
-            .required(true))
-        .arg(clap::Arg::with_name("max-log-lines")
-            .short("m")
-            .long("max-log-lines")
-            .value_name("LINES")
-            .help("The maximum number of lines to record to a log file before the log is automatically rotated")
-            .takes_value(true)
-            .validator(is_num)
-            .default_value("16777216"))
-        .arg(clap::Arg::with_name("buffer-size")
-            .short("s")
-            .long("buffer-size")
-            .value_name("SIZE")
-            .help("The amount of bytes to buffer for file writes")
-            .takes_value(true)
-            .validator(is_num)
-            .default_value("1048576"))
-        .arg(clap::Arg::with_name("busy-led")
-            .short("e")
-            .long("busy-led")
-            .value_name("PIN")
-            .help("Which output GPIO pin to use for the busy LED. The LED will be lit as long as a log file is still open. Set to 0 to disable the LED function.")
-            .takes_value(true)
-            .validator(is_num)
-            .default_value("22"))
-        .get_matches();
+    let matches = Args::parse();
 
-    let interface: &str = matches.value_of("interface").unwrap();
-    let can = CanSocket::open(interface).unwrap();
+    let interface: String = matches.interface;
+    let can = CanSocket::open(&interface).unwrap();
 
-    let timeout_value: u64 = matches.value_of("timeout-value").unwrap().parse::<u64>().unwrap();
-    let bus_speed: u64     = matches.value_of("bus-speed").unwrap().parse::<u64>().unwrap();
-    let log_location: &str = matches.value_of("log-location").unwrap();
-    let log_outbox: &str   = matches.value_of("log-outbox").unwrap();
-    let max_log_lines: u64 = matches.value_of("max-log-lines").unwrap().parse::<u64>().unwrap();
-    let buffer_size: usize = matches.value_of("buffer-size").unwrap().parse::<usize>().unwrap();
-    let busy_led_pin: u16  = matches.value_of("busy-led").unwrap().parse::<u16>().unwrap();
+    let timeout_value: u64 = matches.timeout;
+    let bus_speed: u64     = matches.bus_speed;
+    let log_location: &str = &matches.log_location;
+    let max_log_lines: u64 = matches.max_log_lines;
+    let buffer_size: usize = matches.buffer_size.try_into().unwrap();
+    let busy_led_pin: u16  = matches.busy_led;
 
     println!("Interface:       {}", interface);
     println!("Bus speed:       {}", bus_speed);
     println!("Log location:    {}", log_location);
-    println!("Outbox Location: {}", log_outbox);
     println!("Timeout value:   {}", timeout_value);
     println!("Max log lines:   {}", max_log_lines);
     println!("Write buffer:    {}", buffer_size);

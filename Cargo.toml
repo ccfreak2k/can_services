@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 #async-std = "1.10.0"
 chrono = "0.4"
-clap = "2.34.0"
+clap = { version = "4.4.7", features = ["derive"] }
 gpio = "0.4.1"
 hex = "0.4.3"
 log = "0.4.20"
@@ -16,4 +16,4 @@ serde = { version = "1.0.190", features = ["derive"] }
 signal-hook = "0.3.17"
 threadpool = "1.8.1"
 #tokio = { version = "1.33.0", features = ["full"] }
-toml = "0.5.11"
+toml = "0.8.6"

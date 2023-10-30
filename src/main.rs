@@ -1,19 +1,19 @@
-use socketcan;
+use socketcan::{CanFilter, CanSocket, Socket, SocketOptions, Frame, EmbeddedFrame};
 
 use log::{info, warn, debug};
 
 fn main() {
     info!("Starting up");
     // Open the interface and set the filter.
-    let s = socketcan::CANSocket::open("can0").unwrap();
-    let filter: socketcan::CANFilter = socketcan::CANFilter::new(0x465, 0x7FF).unwrap();
-    s.set_filter(&[filter]).unwrap();
+    let s = CanSocket::open("can0").unwrap();
+    let filter: CanFilter = CanFilter::new(0x465, 0x7FF);
+    s.set_filters(&[filter]).unwrap();
     loop {
         let f = s.read_frame().unwrap();
         // Process the frame
-        if f.is_error() == false {
+        if f.is_error_frame() == false {
             let data: &[u8] = f.data();
-            match f.id() {
+            match f.id_word() {
                 0x084 => {
                     // Clock
                     let minute: u8 = data[4];
