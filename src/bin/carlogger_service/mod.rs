@@ -1,5 +1,5 @@
 use log::info;
-use std::time::{SystemTime, Duration, UNIX_EPOCH};
+use std::time::Duration;
 use std::io::{BufWriter, Result, Write};
 use std::fs::{OpenOptions, File};
 use socketcan::{CanFilter, CanFrame, CanSocket, EmbeddedFrame, Id, Socket, SocketOptions, Frame};
@@ -36,13 +36,11 @@ impl Service {
 pub struct Logger {
     fd: BufWriter<File>,
     iface: String,
-    last_time_stamp: Duration,
 }
 
 impl Logger {
     pub fn new(path: String, iface: String, buf_size: usize) -> Logger {
         Logger {
-            last_time_stamp: Duration::new(0, 0),
             iface,
             fd: BufWriter::with_capacity(buf_size, OpenOptions::new().append(true).create(true).open(path).unwrap())
         }
@@ -52,9 +50,8 @@ impl Logger {
         let _ = self.fd.flush();
     }
 
-    pub fn log(&mut self, f: CanFrame) -> Result<usize> {
-        self.last_time_stamp = std::cmp::max(SystemTime::now().duration_since(UNIX_EPOCH).unwrap(), self.last_time_stamp);
-        let lts = self.last_time_stamp.as_micros();
+    pub fn log(&mut self, f: CanFrame, t: Duration) -> Result<usize> {
+        let lts = t.as_micros();
         let header: String = format!("({}.{:06}) {}", lts/1_000_000, lts%1_000_000, self.iface);
         let body: String = match f {
             CanFrame::Error { .. } => {
