@@ -85,7 +85,8 @@ fn main() {
         if busy_led_pin != 0 {
             busy_led.set_low().unwrap();
         }
-        can.set_read_timeout(time::Duration::from_secs(60)).unwrap();
+        // Setting a timeout of 0 causes it to not respond to signals, so set it arbitrarily large
+        can.set_read_timeout(time::Duration::from_secs(300)).unwrap();
         can.set_filter_accept_all().unwrap();
         // Wait for a CAN frame
         let mut current_log_lines: u64 = 0;
@@ -245,6 +246,13 @@ fn main() {
                                 busy_led.set_value(led_state).unwrap();
                             }
                             timeout -= 1;
+                            if timeout == (timeout_value * 2) - 2 {
+                                if let Err(_) = tx.send(LogMessage::Flush) {
+                                    println!("Wrote {} lines to log", current_log_lines);
+                                    println!("Logging thread exited unexpectedly (log queue sender error); rotating log");
+                                    break;
+                                }
+                            }
                             continue;
                         } else if e.kind() == std::io::ErrorKind::Interrupted {
                             // Interrupted by signal
