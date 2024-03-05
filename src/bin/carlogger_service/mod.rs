@@ -2,6 +2,8 @@ use log::info;
 use std::time::Duration;
 use std::io::{BufWriter, Result, Write};
 use std::fs::{OpenOptions, File};
+
+use geoutils::Location;
 use socketcan::{CanFilter, CanFrame, CanSocket, EmbeddedFrame, Id, Socket, SocketOptions, Frame};
 
 pub struct Service {
@@ -84,5 +86,41 @@ impl Logger {
 
     pub fn flush(&mut self) -> Result<()> {
         return self.fd.flush();
+    }
+}
+
+pub enum ParsedFrame {
+    None,
+    _465 (Location),
+}
+
+pub fn parse_frame(frame: CanFrame) -> ParsedFrame {
+    match frame.id_word() {
+        0x465 => {
+            let data = frame.data();
+            let lat: i16 = (data[0] as i16) - 89;
+            let mut lat_minutes: f32 = ((data[1] >> 2) as u8) as f32;
+            lat_minutes += ((u16::from_be_bytes([data[2], data[3]]) >> 2) as f32) * 0.0001;
+            let lat_degrees = lat_minutes / 60.0;
+            // if lat is less than 0, subtract lat_minutes
+            // otherwise, add lat_minutes
+            let latitude: f32 = if lat < 0 {
+                lat as f32 - lat_degrees
+            } else {
+                lat as f32 + lat_degrees
+            };
+            let lon: i16 = (i16::from_be_bytes([data[4], data[5]]) >> 7) - 179;
+            let mut lon_minutes: f32 = ((data[5] >> 1) & 0b111111) as f32;
+            lon_minutes += ((u16::from_be_bytes([data[6], data[7]]) >> 2) as f32) * 0.0001;
+            let lon_degrees = lon_minutes / 60.0;
+            let longitude: f32 = if lon < 0 {
+                lon as f32 - lon_degrees
+            } else {
+                lon as f32 + lon_degrees
+            };
+            return ParsedFrame::_465 (Location::new(latitude, longitude));
+        },
+        // Return nothing if there's no matches
+        _ => return ParsedFrame::None,
     }
 }

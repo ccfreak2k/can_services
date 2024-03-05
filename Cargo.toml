@@ -7,13 +7,18 @@ edition = "2018"
 [dependencies]
 #async-std = "1.10.0"
 chrono = "0.4"
-clap = { version = "4.4.7", features = ["derive"] }
+clap = { version = "4.5.1", features = ["derive"] }
+geoutils = "0.5.1"
 gpio = "0.4.1"
 hex = "0.4.3"
-log = "0.4.20"
+log = "0.4.21"
 socketcan = "3.3"
-serde = { version = "1.0.190", features = ["derive"] }
+serde = { version = "1.0.197", features = ["derive"] }
 signal-hook = "0.3.17"
 threadpool = "1.8.1"
 #tokio = { version = "1.33.0", features = ["full"] }
-toml = "0.8.6"
+toml = "0.8.10"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
