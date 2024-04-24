@@ -1,8 +1,10 @@
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::TimeZone;
 use clap::{CommandFactory, Parser};
 use clap::error::ErrorKind;
 use geoutils::{Location, Distance};
@@ -77,6 +79,7 @@ fn main() {
     let mut update_last_position: bool = false;
     let mut print_waiting_message: bool = true;
     let mut has_left_shutdown_area: bool = false;
+    let mut file_exists: bool = if file_name.exists() { true } else { false };
 
     while !sig_term.load(Ordering::Relaxed) {
         // Get the next frame
@@ -86,6 +89,16 @@ fn main() {
         }
         match can.read_frame() {
             Ok(msg) => {
+                if file_exists == true && dry_run == false {
+                    match std::fs::remove_file(file_name.clone()) {
+                        Ok(_) => (),
+                        Err(e) => match e.kind() {
+                            std::io::ErrorKind::NotFound => (),
+                            _ => panic!("Error removing file: {}", e)
+                        }
+                    }
+                    file_exists = false;
+                }
                 if msg.id_word() == 0x465 {
                     update_last_position = true;
                     last_position = match carlogger_service::parse_frame(msg) {
@@ -112,16 +125,17 @@ fn main() {
                         println!("Distance to shutdown area: {}m", last_position.distance_to(&shutdown_position).unwrap().meters());
                         if last_position.is_in_circle(&shutdown_position, Distance::from_meters(radius)).unwrap() && has_left_shutdown_area == true {
                             let shutdown_at: u64 = last_time.as_secs() + time;
-                            println!("Shutting down at {}", shutdown_at);
+                            println!("Shutting down at {}: {}", shutdown_at, chrono::Utc.timestamp_opt(shutdown_at as i64, 0).unwrap().to_string());
                             if dry_run == false {
                                 std::fs::write(file_name.clone(), shutdown_at.to_string()).unwrap();
+                                file_exists = true;
                             }
                         } else {
                             println!("Not in shutdown area; removing file");
                             // Check if the file exists first
                             if dry_run == false && file_name.exists() {
                                 match std::fs::remove_file(file_name.clone()) {
-                                    Ok(_) => (),
+                                    Ok(_) => {file_exists = false},
                                     Err(e) => match e.kind() {
                                         std::io::ErrorKind::NotFound => (),
                                         _ => panic!("Error removing file: {}", e)
