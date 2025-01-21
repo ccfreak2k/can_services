@@ -51,10 +51,9 @@ fn main() {
                         // car clock is offset by the same amount. It should be close enough to not matter though.
                         // Compare the local clock to the GPS message and set it if it's more than 2 seconds off
                         if (local_time - gps_time).abs() > TimeDelta::seconds(2) {
-                            println!("System time is {} seconds {} GPS time",
+                            println!("System time is {} seconds {} GPS time; setting system time",
                                 (gps_time - local_time).num_seconds().abs() as f64,
                                 if gps_time > local_time { "behind" } else { "ahead of" });
-                            println!("Setting system time to GPS time");
                             // Set the local system time to GPS time
                             let mut ts = timespec {
                                 tv_sec: gps_time.timestamp() as i64,
