@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time;
 use chrono;
 use chrono::prelude::*;
-use gpio::GpioOut;
+use gpiod;
 use threadpool::Builder;
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -31,7 +31,7 @@ enum WriterError {
 
 #[derive(Parser)]
 #[command(name = "recorder")]
-#[command(version = "1.1")]
+#[command(version = "1.1.1")]
 #[command(author)]
 #[command(about = "Records CAN data to a file")]
 struct Args {
@@ -47,8 +47,8 @@ struct Args {
     max_log_lines: u64,
     #[arg(short = 's', long, name = "size", default_value = "1048576", value_parser = clap::value_parser!(u32).range(1..), help = "The amount of bytes to buffer for file writes")]
     buffer_size: u32,
-    #[arg(short = 'e', long, name = "pin_number", default_value = "22", value_parser = clap::value_parser!(u16).range(0..), help = "Which output GPIO pin to use for the busy LED. The LED will be lit as long as a log file is still open. Set to 0 to disable the LED function.")]
-    busy_led: u16,
+    #[arg(short = 'e', long, name = "pin_number", default_value = "22", value_parser = clap::value_parser!(u32).range(0..), help = "Which output GPIO pin to use for the busy LED. The LED will be lit as long as a log file is still open. Set to 0 to disable the LED function.")]
+    busy_led: u32,
 }
 
 fn main() {
@@ -62,7 +62,7 @@ fn main() {
     let log_location: &str = &matches.log_location;
     let max_log_lines: u64 = matches.max_log_lines;
     let buffer_size: usize = matches.buffer_size.try_into().unwrap();
-    let busy_led_pin: u16  = matches.busy_led;
+    let busy_led_pin: u32  = matches.busy_led;
 
     println!("Interface:     {}", interface);
     println!("Bus speed:     {}", bus_speed);
@@ -75,7 +75,10 @@ fn main() {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&sig_term)).unwrap();
     let sig_hup = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&sig_hup)).unwrap();
-    let mut busy_led = gpio::sysfs::SysFsGpioOutput::open(busy_led_pin).unwrap();
+    //let mut busy_led = gpio::sysfs::SysFsGpioOutput::open(busy_led_pin).unwrap();
+    let gpio_chip = gpiod::Chip::new("gpiochip0").unwrap();
+    let gpio_opts = gpiod::Options::output([busy_led_pin]).values([false]);
+    let gpio_output = gpio_chip.request_lines(gpio_opts).unwrap();
 
     // Two threads let one finish and close a file while the next starts a new one.
     let pool = Builder::new().num_threads(2).thread_name("Writer".to_string()).build();
@@ -83,7 +86,7 @@ fn main() {
     println!("Waiting for first frame");
     while !sig_term.load(Ordering::Relaxed) {
         if busy_led_pin != 0 {
-            busy_led.set_low().unwrap();
+            gpio_output.set_values([false]).unwrap();
         }
         // Setting a timeout of 0 causes it to not respond to signals, so set it arbitrarily large
         can.set_read_timeout(time::Duration::from_secs(300)).unwrap();
@@ -112,7 +115,7 @@ fn main() {
         {
             // start logging
             if busy_led_pin != 0 {
-                busy_led.set_high().unwrap();
+                gpio_output.set_values([true]).unwrap();
             }
             let log_name = format!("{}.log", &Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true).replace(":","_"));
             let log_path = format!("{}/{}", log_location, log_name);
@@ -219,14 +222,14 @@ fn main() {
                             busy_state = true;
                             frame_counter = 0;
                             led_state = true;
-                            busy_led.set_high().unwrap();
+                            gpio_output.set_values([true]).unwrap();
                         }
                         // Flash the LED based on frame count
                         frame_counter += 1;
                         if frame_counter >= 100 && busy_led_pin != 0 {
                             frame_counter = 0;
                             led_state = !led_state;
-                            busy_led.set_value(led_state).unwrap();
+                            gpio_output.set_values([led_state]).unwrap();
                         }
                         timeout = timeout_value*2;
                         message
@@ -243,7 +246,7 @@ fn main() {
                                 if timeout % 2 == 0 {
                                     led_state = !led_state;
                                 }
-                                busy_led.set_value(led_state).unwrap();
+                                gpio_output.set_values([led_state]).unwrap();
                             }
                             timeout -= 1;
                             if timeout == (timeout_value * 2) - 2 {
@@ -307,7 +310,7 @@ fn main() {
             sig_hup.store(false, Ordering::Relaxed);
             let _ = tx.send(LogMessage::Exit);
             if busy_led_pin != 0 {
-                busy_led.set_low().unwrap();
+                gpio_output.set_values([false]).unwrap();
             }
             println!("Wrote {} lines to log", current_log_lines);
             println!("Waiting for first frame");
